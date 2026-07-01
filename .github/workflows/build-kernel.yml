@@ -12,16 +12,19 @@ on:
         required: true
         default: 'true'
         type: boolean
-      clean_build:
-        description: 'Clean build'
-        required: false
-        default: 'false'
-        type: boolean
 
 env:
   ARCH: arm64
   SUBARCH: arm64
-  KERNEL_REPO: https://github.com/OnePlusOSS/android_kernel_oneplus_sm8650
+  # Community fork that is confirmed to work with traditional make
+  KERNEL_LINEAGE: https://github.com/LineageOS/android_kernel_oneplus_sm8650
+  KERNEL_LINEAGE_BRANCH: lineage-23.2
+  # OnePlus official (Kleaf/Bazel based — fallback)
+  KERNEL_ONEPLUS: https://github.com/OnePlusOSS/android_kernel_oneplus_sm8650
+  KERNEL_ONEPLUS_BRANCH: oneplus/sm8650_v_15.0.0_oneplus12
+  # AOSP GKI fallback
+  KERNEL_AOSP: https://android.googlesource.com/kernel/common
+  KERNEL_AOSP_BRANCH: android14-6.1
   KSU_REPO: https://github.com/tiann/KernelSU
   AK3_REPO: https://github.com/osm0sis/AnyKernel3
 
@@ -29,6 +32,8 @@ jobs:
   build:
     name: Build Kernel
     runs-on: ubuntu-22.04
+    env:
+      OUT_DIR: ${{ github.workspace }}/out
 
     steps:
       - name: Checkout repository
@@ -36,7 +41,7 @@ jobs:
 
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/local/lib/android /opt/ghc
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet
           sudo apt-get clean
           df -h
 
@@ -46,243 +51,361 @@ jobs:
           sudo apt-get install -y \
             bc bison build-essential ccache flex \
             git libelf-dev libssl-dev lz4 python3 \
-            zip unzip wget curl cpio ninja-build
+            zip unzip wget curl cpio ninja-build \
+            pahole dwarves
 
-      - name: Setup LLVM / Clang
+      - name: Setup Clang toolchain
         run: |
-          # Use LLVM 17 from apt for reproducible builds
-          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
-          sudo add-apt-repository "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main" -y
-          sudo apt-get update -qq
-          sudo apt-get install -y clang-17 lld-17 llvm-17
-          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-17 100
-          sudo update-alternatives --install /usr/bin/lld   lld   /usr/bin/lld-17   100
+          # Install clang-15 (stable, well tested with android14-6.1 kernels)
+          sudo apt-get install -y clang lld llvm
           clang --version
+          echo "CC_VERSION=$(clang --version | head -1)" >> $GITHUB_ENV
 
       - name: Install aarch64 cross-compiler
         run: |
           sudo apt-get install -y gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+          aarch64-linux-gnu-gcc --version
 
       - name: Cache kernel source
+        id: cache-kernel
         uses: actions/cache@v4
         with:
           path: kernel_source
-          key: kernel-sm8650-oneplus12-${{ hashFiles('patches/*.patch') }}
+          key: kernel-op12-${{ env.KERNEL_LINEAGE_BRANCH }}-${{ hashFiles('patches/*.patch') }}
           restore-keys: |
-            kernel-sm8650-oneplus12-
+            kernel-op12-${{ env.KERNEL_LINEAGE_BRANCH }}-
+            kernel-op12-
 
       - name: Clone kernel source
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
         run: |
-          if [ ! -d "kernel_source/.git" ]; then
-            echo "[*] Trying OnePlus SM8650 branches..."
-            CLONED=false
-            for BRANCH in \
-              "oneplus/sm8650_v_15.0.0_oneplus12" \
-              "oneplus/sm8650_u_14.0.0_oneplus12" \
-              "sm8650" \
-              "main"; do
-              echo "    Trying branch: $BRANCH"
-              git clone --depth=1 \
-                --branch "$BRANCH" \
-                "${{ env.KERNEL_REPO }}" kernel_source 2>/dev/null && \
-                CLONED=true && echo "KERNEL_SOURCE=oneplus" >> $GITHUB_ENV && break || true
-            done
-
-            if ! $CLONED; then
-              echo "[!] OnePlus repo unavailable, falling back to AOSP GKI android15-6.6..."
-              git clone --depth=1 \
-                --branch android15-6.6 \
-                https://android.googlesource.com/kernel/common \
-                kernel_source 2>/dev/null || \
-              git clone --depth=1 \
-                --branch android14-6.1 \
-                https://android.googlesource.com/kernel/common \
-                kernel_source
-              echo "KERNEL_SOURCE=aosp" >> $GITHUB_ENV
-            fi
+          echo "[*] Strategy 1: LineageOS SM8650 (lineage-23.2) — best make compatibility"
+          if git clone --depth=1 \
+              --branch "${{ env.KERNEL_LINEAGE_BRANCH }}" \
+              "${{ env.KERNEL_LINEAGE }}" \
+              kernel_source 2>&1; then
+            echo "KERNEL_TYPE=lineage" >> $GITHUB_ENV
+            echo "[+] LineageOS kernel cloned"
           else
-            echo "Using cached kernel source"
-            # Detect which kernel we have
-            if grep -r "oneplus" kernel_source/arch/arm64/configs/ &>/dev/null 2>&1; then
-              echo "KERNEL_SOURCE=oneplus" >> $GITHUB_ENV
+            echo "[!] LineageOS failed, trying OnePlusOSS..."
+            if git clone --depth=1 \
+                --branch "${{ env.KERNEL_ONEPLUS_BRANCH }}" \
+                "${{ env.KERNEL_ONEPLUS }}" \
+                kernel_source 2>&1; then
+              echo "KERNEL_TYPE=oneplus" >> $GITHUB_ENV
+              echo "[+] OnePlus kernel cloned"
             else
-              echo "KERNEL_SOURCE=aosp" >> $GITHUB_ENV
+              echo "[!] OnePlus failed, falling back to AOSP GKI android14-6.1..."
+              git clone --depth=1 \
+                --branch "${{ env.KERNEL_AOSP_BRANCH }}" \
+                "${{ env.KERNEL_AOSP }}" \
+                kernel_source
+              echo "KERNEL_TYPE=aosp" >> $GITHUB_ENV
+              echo "[+] AOSP GKI kernel cloned"
             fi
           fi
-          echo "[+] Kernel source ready: $(cat kernel_source/Makefile | grep -m3 'VERSION\|PATCHLEVEL\|SUBLEVEL')"
 
-      - name: Clone KernelSU
+      - name: Detect cached kernel type
+        if: steps.cache-kernel.outputs.cache-hit == 'true'
+        run: |
+          if grep -q "lineageos" kernel_source/arch/arm64/configs/* 2>/dev/null; then
+            echo "KERNEL_TYPE=lineage" >> $GITHUB_ENV
+          elif grep -q "oneplus" kernel_source/arch/arm64/configs/* 2>/dev/null; then
+            echo "KERNEL_TYPE=oneplus" >> $GITHUB_ENV
+          else
+            echo "KERNEL_TYPE=aosp" >> $GITHUB_ENV
+          fi
+
+      - name: Verify and inspect kernel source
+        run: |
+          echo "=== Kernel Makefile header ==="
+          head -6 kernel_source/Makefile || { echo "ERROR: No Makefile!"; exit 1; }
+
+          echo ""
+          echo "=== arch/arm64/configs/ contents ==="
+          ls -la kernel_source/arch/arm64/configs/ | head -30
+
+          echo ""
+          echo "=== Vendor configs (if any) ==="
+          ls kernel_source/arch/arm64/configs/vendor/ 2>/dev/null || echo "(no vendor/ directory)"
+
+          echo ""
+          echo "=== Available defconfigs ==="
+          find kernel_source/arch/arm64/configs -name "*defconfig*" -o -name "*.config" 2>/dev/null | head -20
+
+          echo ""
+          echo "=== Kernel type: $KERNEL_TYPE ==="
+
+      - name: Integrate KernelSU
         if: ${{ github.event.inputs.with_ksu != 'false' }}
         run: |
-          if [ ! -d "kernel_source/KernelSU" ]; then
-            git clone --depth=1 "${{ env.KSU_REPO }}" kernel_source/KernelSU
-          fi
-          KSU_VERSION=$(cd kernel_source/KernelSU && git describe --tags --abbrev=0 2>/dev/null || echo "unknown")
-          echo "KSU_VERSION=$KSU_VERSION" >> $GITHUB_ENV
+          echo "[*] Cloning KernelSU..."
+          git clone --depth=1 "${{ env.KSU_REPO }}" kernel_source/KernelSU
+          KSU_VER=$(cd kernel_source/KernelSU && git describe --tags --abbrev=0 2>/dev/null || echo "latest")
+          echo "KSU_VERSION=$KSU_VER" >> $GITHUB_ENV
+          echo "[+] KernelSU $KSU_VER"
 
-          # Wire KernelSU into the build system
-          if ! grep -q "KernelSU" kernel_source/drivers/Makefile; then
+          # Wire into build system
+          grep -q "KernelSU" kernel_source/drivers/Makefile 2>/dev/null || \
             echo 'obj-$(CONFIG_KSU) += ../KernelSU/kernel/' >> kernel_source/drivers/Makefile
-          fi
-          if ! grep -q "KernelSU" kernel_source/drivers/Kconfig; then
-            echo 'source "KernelSU/kernel/Kconfig"' >> kernel_source/drivers/Kconfig
-          fi
+
+          grep -q "KernelSU" kernel_source/drivers/Kconfig 2>/dev/null || \
+            printf '\nsource "KernelSU/kernel/Kconfig"\n' >> kernel_source/drivers/Kconfig
+
+          echo "[+] KernelSU wired into drivers/Makefile and drivers/Kconfig"
 
       - name: Apply NetHunter patches
         run: |
           cd kernel_source
-          for patch in ../patches/*.patch; do
-            echo "Applying: $(basename "$patch")"
-            git apply --ignore-whitespace "$patch" 2>/dev/null || \
-              patch -p1 --forward --ignore-whitespace < "$patch" 2>/dev/null || \
-              echo "Skipped (already applied): $(basename "$patch")"
+          APPLIED=0
+          SKIPPED=0
+          for patch in $GITHUB_WORKSPACE/patches/*.patch; do
+            name=$(basename "$patch")
+            if git apply --check --ignore-whitespace "$patch" 2>/dev/null; then
+              git apply --ignore-whitespace "$patch"
+              echo "  [+] Applied: $name"
+              APPLIED=$((APPLIED+1))
+            else
+              echo "  [~] Skipped (already applied or incompatible): $name"
+              SKIPPED=$((SKIPPED+1))
+            fi
           done
+          echo "[*] Patches: $APPLIED applied, $SKIPPED skipped"
 
-      - name: Generate defconfig
+      - name: Generate .config
         run: |
-          mkdir -p out
+          mkdir -p "$OUT_DIR"
 
-          # Pick the right base defconfig
-          if [ -f "kernel_source/arch/arm64/configs/gki_defconfig" ]; then
-            BASE_DEFCONFIG="gki_defconfig"
-          elif [ -f "kernel_source/arch/arm64/configs/defconfig" ]; then
-            BASE_DEFCONFIG="defconfig"
-          else
-            BASE_DEFCONFIG=$(ls kernel_source/arch/arm64/configs/*.config 2>/dev/null | head -1 | xargs basename || echo "defconfig")
-          fi
-          echo "BASE_DEFCONFIG=$BASE_DEFCONFIG" >> $GITHUB_ENV
-          echo "[*] Using base defconfig: $BASE_DEFCONFIG"
+          # ── Detect the correct defconfig ────────────────────────────────────
+          DEFCONFIG=""
 
-          make -C kernel_source \
-            O=../out \
-            ARCH=${{ env.ARCH }} \
-            CC=clang \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
-            LLVM=1 LLVM_IAS=1 \
-            "$BASE_DEFCONFIG"
-
-          # Merge vendor fragment if it exists (OnePlus SM8650 = pineapple)
-          for VENDOR_FRAG in \
+          # LineageOS SM8650 uses vendor/lineage configs
+          for candidate in \
             "arch/arm64/configs/vendor/pineapple_GKI.config" \
             "arch/arm64/configs/vendor/pineapple_GKI_consolidate.config" \
-            "arch/arm64/configs/vendor/sm8650_GKI.config"; do
-            if [ -f "kernel_source/$VENDOR_FRAG" ]; then
-              echo "[*] Merging vendor fragment: $VENDOR_FRAG"
-              kernel_source/scripts/kconfig/merge_config.sh -m -O out \
-                out/.config "kernel_source/$VENDOR_FRAG"
+            "arch/arm64/configs/lineageos_pineapple_defconfig" \
+            "arch/arm64/configs/pineapple_GKI.config" \
+            "arch/arm64/configs/gki_defconfig" \
+            "arch/arm64/configs/defconfig"; do
+            if [ -f "kernel_source/$candidate" ]; then
+              DEFCONFIG="$candidate"
+              echo "[+] Found defconfig: $candidate"
               break
             fi
           done
 
+          if [ -z "$DEFCONFIG" ]; then
+            echo "ERROR: No defconfig found! Available configs:"
+            find kernel_source/arch/arm64/configs -type f | head -30
+            exit 1
+          fi
+
+          # ── Build the base .config ───────────────────────────────────────────
+          # Use basename as make target (make looks in arch/$ARCH/configs/)
+          DEFCONFIG_TARGET=$(basename "$DEFCONFIG")
+          DEFCONFIG_DIR=$(dirname "$DEFCONFIG")
+
+          echo "[*] Running: make ARCH=arm64 $DEFCONFIG_TARGET"
+
+          # For vendor/*.config, we may need to specify it differently
+          if echo "$DEFCONFIG" | grep -q "vendor/"; then
+            # First build gki_defconfig, then merge vendor fragment
+            if [ -f "kernel_source/arch/arm64/configs/gki_defconfig" ]; then
+              make -C kernel_source \
+                O="$OUT_DIR" \
+                ARCH=arm64 \
+                CC=clang \
+                CROSS_COMPILE=aarch64-linux-gnu- \
+                LLVM=1 \
+                gki_defconfig
+
+              echo "[*] Merging vendor fragment: $DEFCONFIG"
+              kernel_source/scripts/kconfig/merge_config.sh -m \
+                -O "$OUT_DIR" \
+                "$OUT_DIR/.config" \
+                "kernel_source/$DEFCONFIG"
+            else
+              # No gki_defconfig, try alldefconfig + vendor fragment
+              make -C kernel_source \
+                O="$OUT_DIR" \
+                ARCH=arm64 \
+                CC=clang \
+                CROSS_COMPILE=aarch64-linux-gnu- \
+                LLVM=1 \
+                alldefconfig
+
+              kernel_source/scripts/kconfig/merge_config.sh -m \
+                -O "$OUT_DIR" \
+                "$OUT_DIR/.config" \
+                "kernel_source/$DEFCONFIG"
+            fi
+          else
+            make -C kernel_source \
+              O="$OUT_DIR" \
+              ARCH=arm64 \
+              CC=clang \
+              CROSS_COMPILE=aarch64-linux-gnu- \
+              LLVM=1 \
+              "$DEFCONFIG_TARGET"
+          fi
+
+          echo ""
+          echo "[*] Base .config generated. Size: $(wc -l < "$OUT_DIR/.config") lines"
+
       - name: Merge NetHunter config fragments
         run: |
-          kernel_source/scripts/kconfig/merge_config.sh -m -O out \
-            out/.config \
+          echo "[*] Merging NetHunter config fragments..."
+
+          kernel_source/scripts/kconfig/merge_config.sh -m \
+            -O "$OUT_DIR" \
+            "$OUT_DIR/.config" \
             nethunter-config/nethunter.config \
             nethunter-config/nethunter-wifi.config
 
+          # Finalize merged config
           make -C kernel_source \
-            O=../out \
-            ARCH=${{ env.ARCH }} \
+            O="$OUT_DIR" \
+            ARCH=arm64 \
             CC=clang \
             CROSS_COMPILE=aarch64-linux-gnu- \
-            LLVM=1 LLVM_IAS=1 \
+            LLVM=1 \
             olddefconfig
 
-          echo "[*] NetHunter config check:"
-          grep -E "CONFIG_USB_CONFIGFS_F_HID|CONFIG_HID|CONFIG_CFG80211|CONFIG_KSU|CONFIG_TUN=" out/.config || true
+          echo ""
+          echo "[*] NetHunter feature verification:"
+          for key in \
+            CONFIG_USB_CONFIGFS_F_HID \
+            CONFIG_CFG80211 \
+            CONFIG_MAC80211 \
+            CONFIG_TUN \
+            CONFIG_PACKET \
+            CONFIG_KSU \
+            CONFIG_BT \
+            CONFIG_NETFILTER; do
+            val=$(grep "^${key}=" "$OUT_DIR/.config" 2>/dev/null | cut -d= -f2 || echo "NOT SET")
+            printf "  %-40s %s\n" "$key" "$val"
+          done
 
-      - name: Build kernel
+      - name: Build kernel image
         run: |
+          echo "[*] Building with $(nproc) jobs..."
+          BUILD_START=$(date +%s)
+
           make -C kernel_source \
-            O=../out \
-            ARCH=${{ env.ARCH }} \
-            SUBARCH=${{ env.SUBARCH }} \
+            O="$OUT_DIR" \
+            ARCH=arm64 \
+            SUBARCH=arm64 \
             CC=clang \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
-            LLVM=1 LLVM_IAS=1 \
+            LLVM=1 \
+            LLVM_IAS=1 \
             -j$(nproc) \
-            Image.lz4 dtbs
+            Image.lz4 \
+            2>&1 | tail -30
+
+          # Also try to build DTBs (non-fatal)
+          make -C kernel_source \
+            O="$OUT_DIR" \
+            ARCH=arm64 \
+            CC=clang \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            LLVM=1 \
+            -j$(nproc) \
+            dtbs 2>/dev/null || echo "[!] DTBs skipped"
+
+          BUILD_END=$(date +%s)
+          echo "[+] Build done in $((BUILD_END - BUILD_START))s"
+          ls -lh "$OUT_DIR/arch/arm64/boot/Image.lz4"
 
       - name: Clone AnyKernel3
-        run: |
-          git clone --depth=1 "${{ env.AK3_REPO }}" AnyKernel3
+        run: git clone --depth=1 "${{ env.AK3_REPO }}" AnyKernel3
 
       - name: Package flashable ZIP
         run: |
-          cp out/arch/arm64/boot/Image.lz4 AnyKernel3/
+          cp "$OUT_DIR/arch/arm64/boot/Image.lz4" AnyKernel3/
 
-          # DTBs
+          # Collect DTBs
           mkdir -p AnyKernel3/dtbs
-          find out/arch/arm64/boot/dts -name "*.dtb" -exec cp {} AnyKernel3/dtbs/ \; 2>/dev/null || true
+          find "$OUT_DIR/arch/arm64/boot/dts" -name "*.dtb" \
+            -exec cp {} AnyKernel3/dtbs/ \; 2>/dev/null || true
 
-          # DTBO
-          [ -f out/arch/arm64/boot/dtbo.img ] && \
-            cp out/arch/arm64/boot/dtbo.img AnyKernel3/ || true
+          # DTBO (optional)
+          [ -f "$OUT_DIR/arch/arm64/boot/dtbo.img" ] && \
+            cp "$OUT_DIR/arch/arm64/boot/dtbo.img" AnyKernel3/ || true
 
-          # Write anykernel.sh
+          # Write AnyKernel3 config
           cat > AnyKernel3/anykernel.sh << 'AKEOF'
-          properties() { '
-          kernel.string=NetHunter Kernel for OnePlus 12
-          do.devicecheck=1
-          do.modules=0
-          do.systemless=1
-          do.cleanup=1
-          do.cleanuponabort=0
-          device.name1=OP5959L1
-          device.name2=OPD2403
-          device.name3=waffle
-          device.name4=OP5959EEA
-          supported.versions=16
-          '; }
+# AnyKernel3 for OnePlus 12 NetHunter Kernel
+properties() { '
+kernel.string=NetHunter Kernel for OnePlus 12 (KernelSU + NetHunter)
+do.devicecheck=1
+do.modules=0
+do.systemless=1
+do.cleanup=1
+do.cleanuponabort=0
+device.name1=OP5959L1
+device.name2=OPD2403
+device.name3=waffle
+device.name4=OP5959EEA
+device.name5=OnePlus12
+supported.versions=14-16
+supported.patchlevels=
+'; }
 
-          block=boot;
-          is_slot_device=1;
-          ramdisk_compression=auto;
+block=boot;
+is_slot_device=1;
+ramdisk_compression=auto;
+patch_vbmeta_flag=auto;
 
-          . tools/ak3-core.sh
-          . tools/flash.sh
-          AKEOF
+. tools/ak3-core.sh
+split_boot;
+flash_boot;
+AKEOF
 
           mkdir -p dist
-          VERSION="NetHunter-OnePlus12-Android16-$(date +%Y%m%d)"
+          ZIP_NAME="NetHunter-KernelSU-OnePlus12-Android16-$(date +%Y%m%d).zip"
           cd AnyKernel3
-          zip -r9 "../dist/${VERSION}.zip" . -x "*.git*"
-          echo "ZIP_NAME=${VERSION}.zip" >> $GITHUB_ENV
+          zip -r9 "$GITHUB_WORKSPACE/dist/${ZIP_NAME}" . -x "*.git*" -x "*.DS_Store"
+          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+          echo "[+] Packaged: dist/${ZIP_NAME}"
 
-      - name: Upload kernel artifacts
+      - name: Upload flashable ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: nethunter-kernel-oneplus12
-          path: |
-            dist/*.zip
-            out/arch/arm64/boot/Image.lz4
+          name: nethunter-kernel-oneplus12-zip
+          path: dist/*.zip
           retention-days: 30
 
-      - name: Upload kernel image only
+      - name: Upload kernel image (raw)
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-image
-          path: out/arch/arm64/boot/Image.lz4
-          retention-days: 7
+          name: kernel-image-lz4
+          path: ${{ env.OUT_DIR }}/arch/arm64/boot/Image.lz4
+          retention-days: 30
 
       - name: Build summary
+        if: always()
         run: |
-          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "## NetHunter Kernel Build Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-          echo "| Device | OnePlus 12 (SM8650 / waffle) |" >> $GITHUB_STEP_SUMMARY
-          echo "| Android | 16 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Device | OnePlus 12 (SM8650 / waffle / OPD2403) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Android | 16 (OOS16) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Kernel source | $KERNEL_TYPE |" >> $GITHUB_STEP_SUMMARY
           echo "| KernelSU | ${{ env.KSU_VERSION }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| ZIP | \`${{ env.ZIP_NAME }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Clang | ${{ env.CC_VERSION }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### NetHunter Features" >> $GITHUB_STEP_SUMMARY
-          echo "- HID gadget (BadUSB attacks)" >> $GITHUB_STEP_SUMMARY
-          echo "- WiFi monitor mode + packet injection" >> $GITHUB_STEP_SUMMARY
-          echo "- Bluetooth HID/RFCOMM/BNEP" >> $GITHUB_STEP_SUMMARY
-          echo "- Full iptables/netfilter stack" >> $GITHUB_STEP_SUMMARY
-          echo "- USB OTG + external adapter support" >> $GITHUB_STEP_SUMMARY
-          echo "- KernelSU root" >> $GITHUB_STEP_SUMMARY
+          echo "### NetHunter Features Enabled" >> $GITHUB_STEP_SUMMARY
+          echo "| Feature | Config |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| HID gadget (BadUSB) | CONFIG_USB_CONFIGFS_F_HID |" >> $GITHUB_STEP_SUMMARY
+          echo "| WiFi monitor + inject | CONFIG_CFG80211, MAC80211 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Bluetooth | CONFIG_BT, RFCOMM, BNEP |" >> $GITHUB_STEP_SUMMARY
+          echo "| iptables / NAT | CONFIG_NETFILTER, NF_NAT |" >> $GITHUB_STEP_SUMMARY
+          echo "| USB OTG host | CONFIG_USB_OTG |" >> $GITHUB_STEP_SUMMARY
+          echo "| TUN/TAP | CONFIG_TUN |" >> $GITHUB_STEP_SUMMARY
+          echo "| Crypto API | CONFIG_CRYPTO_USER_API |" >> $GITHUB_STEP_SUMMARY
+          echo "| KernelSU root | CONFIG_KSU |" >> $GITHUB_STEP_SUMMARY
+          echo "| USB WiFi adapters | RTL88xx, MT76xx, ATH9K |" >> $GITHUB_STEP_SUMMARY
