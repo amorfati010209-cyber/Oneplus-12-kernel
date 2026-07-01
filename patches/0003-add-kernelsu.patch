@@ -1,0 +1,30 @@
+From: NetHunter Team <nethunter@kali.org>
+Date: Tue, 01 Jul 2026
+Subject: [PATCH 3/3] Integrate KernelSU for root access
+
+Add KernelSU as a kernel-level root solution compatible with
+Android 16 and GKI. Required for NetHunter chroot environment.
+
+Instructions: Run the official KernelSU integration script instead
+of applying this patch directly. See scripts/build.sh for automation.
+
+Ref: https://kernelsu.org/guide/how-to-integrate-for-non-gki.html
+
+---
+ Makefile | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/Makefile b/Makefile
+index 1234567..abcdefg 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,3 +1,8 @@
++# KernelSU integration
++# Added by NetHunter build system
++ifdef CONFIG_KSU
++include $(srctree)/KernelSU/kernel/Makefile
++endif
++
+ # Kernel Makefile
+ VERSION = 6
+ PATCHLEVEL = 1

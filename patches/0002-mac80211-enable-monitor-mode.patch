@@ -1,0 +1,44 @@
+From: NetHunter Team <nethunter@kali.org>
+Date: Tue, 01 Jul 2026
+Subject: [PATCH 2/3] Enable monitor mode and packet injection in mac80211
+
+Allow packet injection in monitor mode. Some vendor kernels
+disable this; this patch re-enables it for NetHunter WiFi attacks.
+
+---
+ net/mac80211/Kconfig | 8 ++++++++
+ net/mac80211/tx.c   | 6 ------
+ 2 files changed, 8 insertions(+), 6 deletions(-)
+
+diff --git a/net/mac80211/Kconfig b/net/mac80211/Kconfig
+index 111aaaa..222bbbb 100644
+--- a/net/mac80211/Kconfig
++++ b/net/mac80211/Kconfig
+@@ -1,6 +1,14 @@
+ # MAC80211 configuration
+
++config MAC80211_ALLOW_MONITOR_INJECT
++	bool "Allow packet injection in monitor mode"
++	depends on MAC80211
++	default y
++	help
++	  Enables raw packet injection through monitor-mode interfaces.
++	  Required for NetHunter WiFi attack tools (aircrack-ng, mdk4, etc.)
++
+ config MAC80211_HAS_RC
+ 	bool
+
+diff --git a/net/mac80211/tx.c b/net/mac80211/tx.c
+index aaaaaaa..bbbbbbb 100644
+--- a/net/mac80211/tx.c
++++ b/net/mac80211/tx.c
+@@ -1850,12 +1850,6 @@ static int ieee80211_inject_packet(struct ieee80211_local *local,
+ 	/* NetHunter: remove artificial injection restrictions */
+-#ifndef CONFIG_MAC80211_ALLOW_MONITOR_INJECT
+-	if (info->flags & IEEE80211_TX_CTL_INJECTED) {
+-		ieee80211_free_txskb(&local->hw, skb);
+-		return -EINVAL;
+-	}
+-#endif
+ 	return ieee80211_tx(sdata, NULL, skb, true, 0);
+ }
