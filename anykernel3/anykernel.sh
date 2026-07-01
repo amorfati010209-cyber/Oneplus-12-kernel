@@ -8,11 +8,11 @@ do.modules=0
 do.systemless=1
 do.cleanup=1
 do.cleanuponabort=0
-device.name1=OP5959L1
-device.name2=OPD2403
-device.name3=waffle
-device.name4=OP5959EEA
-device.name5=OnePlus12
+device.name1=CPH2573
+device.name2=OP595DL1
+device.name3=CPH2573IN
+device.name4=OP5959L1
+device.name5=OPD2403
 supported.versions=16
 supported.patchlevels=
 '; }

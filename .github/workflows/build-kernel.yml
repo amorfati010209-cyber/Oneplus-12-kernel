@@ -334,34 +334,8 @@ jobs:
           [ -f "$OUT_DIR/arch/arm64/boot/dtbo.img" ] && \
             cp "$OUT_DIR/arch/arm64/boot/dtbo.img" AnyKernel3/ || true
 
-          # Write AnyKernel3 config
-          cat > AnyKernel3/anykernel.sh << 'AKEOF'
-# AnyKernel3 for OnePlus 12 NetHunter Kernel
-properties() { '
-kernel.string=NetHunter Kernel for OnePlus 12 (KernelSU + NetHunter)
-do.devicecheck=1
-do.modules=0
-do.systemless=1
-do.cleanup=1
-do.cleanuponabort=0
-device.name1=OP5959L1
-device.name2=OPD2403
-device.name3=waffle
-device.name4=OP5959EEA
-device.name5=OnePlus12
-supported.versions=14-16
-supported.patchlevels=
-'; }
-
-block=boot;
-is_slot_device=1;
-ramdisk_compression=auto;
-patch_vbmeta_flag=auto;
-
-. tools/ak3-core.sh
-split_boot;
-flash_boot;
-AKEOF
+          # Copy AnyKernel3 config from our repo
+          cp anykernel3/anykernel.sh AnyKernel3/anykernel.sh
 
           mkdir -p dist
           ZIP_NAME="NetHunter-KernelSU-OnePlus12-Android16-$(date +%Y%m%d).zip"
