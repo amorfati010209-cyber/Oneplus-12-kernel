@@ -21,9 +21,7 @@ on:
 env:
   ARCH: arm64
   SUBARCH: arm64
-  DEFCONFIG: vendor/pineapple_GKI.config
   KERNEL_REPO: https://github.com/OnePlusOSS/android_kernel_oneplus_sm8650
-  KERNEL_BRANCH: oneplus/sm8650_v_15.0.0_oneplus12
   KSU_REPO: https://github.com/tiann/KernelSU
   AK3_REPO: https://github.com/osm0sis/AnyKernel3
 
@@ -69,23 +67,49 @@ jobs:
         uses: actions/cache@v4
         with:
           path: kernel_source
-          key: kernel-${{ env.KERNEL_BRANCH }}-${{ hashFiles('patches/*.patch') }}
+          key: kernel-sm8650-oneplus12-${{ hashFiles('patches/*.patch') }}
           restore-keys: |
-            kernel-${{ env.KERNEL_BRANCH }}-
+            kernel-sm8650-oneplus12-
 
       - name: Clone kernel source
         run: |
           if [ ! -d "kernel_source/.git" ]; then
-            git clone --depth=1 \
-              --branch "${{ env.KERNEL_BRANCH }}" \
-              "${{ env.KERNEL_REPO }}" kernel_source || \
-            git clone --depth=1 \
-              --branch android14-6.1 \
-              https://android.googlesource.com/kernel/common \
-              kernel_source
+            echo "[*] Trying OnePlus SM8650 branches..."
+            CLONED=false
+            for BRANCH in \
+              "oneplus/sm8650_v_15.0.0_oneplus12" \
+              "oneplus/sm8650_u_14.0.0_oneplus12" \
+              "sm8650" \
+              "main"; do
+              echo "    Trying branch: $BRANCH"
+              git clone --depth=1 \
+                --branch "$BRANCH" \
+                "${{ env.KERNEL_REPO }}" kernel_source 2>/dev/null && \
+                CLONED=true && echo "KERNEL_SOURCE=oneplus" >> $GITHUB_ENV && break || true
+            done
+
+            if ! $CLONED; then
+              echo "[!] OnePlus repo unavailable, falling back to AOSP GKI android15-6.6..."
+              git clone --depth=1 \
+                --branch android15-6.6 \
+                https://android.googlesource.com/kernel/common \
+                kernel_source 2>/dev/null || \
+              git clone --depth=1 \
+                --branch android14-6.1 \
+                https://android.googlesource.com/kernel/common \
+                kernel_source
+              echo "KERNEL_SOURCE=aosp" >> $GITHUB_ENV
+            fi
           else
-            git -C kernel_source fetch --depth=1 origin "${{ env.KERNEL_BRANCH }}" || true
+            echo "Using cached kernel source"
+            # Detect which kernel we have
+            if grep -r "oneplus" kernel_source/arch/arm64/configs/ &>/dev/null 2>&1; then
+              echo "KERNEL_SOURCE=oneplus" >> $GITHUB_ENV
+            else
+              echo "KERNEL_SOURCE=aosp" >> $GITHUB_ENV
+            fi
           fi
+          echo "[+] Kernel source ready: $(cat kernel_source/Makefile | grep -m3 'VERSION\|PATCHLEVEL\|SUBLEVEL')"
 
       - name: Clone KernelSU
         if: ${{ github.event.inputs.with_ksu != 'false' }}
@@ -116,6 +140,19 @@ jobs:
 
       - name: Generate defconfig
         run: |
+          mkdir -p out
+
+          # Pick the right base defconfig
+          if [ -f "kernel_source/arch/arm64/configs/gki_defconfig" ]; then
+            BASE_DEFCONFIG="gki_defconfig"
+          elif [ -f "kernel_source/arch/arm64/configs/defconfig" ]; then
+            BASE_DEFCONFIG="defconfig"
+          else
+            BASE_DEFCONFIG=$(ls kernel_source/arch/arm64/configs/*.config 2>/dev/null | head -1 | xargs basename || echo "defconfig")
+          fi
+          echo "BASE_DEFCONFIG=$BASE_DEFCONFIG" >> $GITHUB_ENV
+          echo "[*] Using base defconfig: $BASE_DEFCONFIG"
+
           make -C kernel_source \
             O=../out \
             ARCH=${{ env.ARCH }} \
@@ -123,7 +160,20 @@ jobs:
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
             LLVM=1 LLVM_IAS=1 \
-            ${{ env.DEFCONFIG }}
+            "$BASE_DEFCONFIG"
+
+          # Merge vendor fragment if it exists (OnePlus SM8650 = pineapple)
+          for VENDOR_FRAG in \
+            "arch/arm64/configs/vendor/pineapple_GKI.config" \
+            "arch/arm64/configs/vendor/pineapple_GKI_consolidate.config" \
+            "arch/arm64/configs/vendor/sm8650_GKI.config"; do
+            if [ -f "kernel_source/$VENDOR_FRAG" ]; then
+              echo "[*] Merging vendor fragment: $VENDOR_FRAG"
+              kernel_source/scripts/kconfig/merge_config.sh -m -O out \
+                out/.config "kernel_source/$VENDOR_FRAG"
+              break
+            fi
+          done
 
       - name: Merge NetHunter config fragments
         run: |
@@ -139,6 +189,9 @@ jobs:
             CROSS_COMPILE=aarch64-linux-gnu- \
             LLVM=1 LLVM_IAS=1 \
             olddefconfig
+
+          echo "[*] NetHunter config check:"
+          grep -E "CONFIG_USB_CONFIGFS_F_HID|CONFIG_HID|CONFIG_CFG80211|CONFIG_KSU|CONFIG_TUN=" out/.config || true
 
       - name: Build kernel
         run: |
