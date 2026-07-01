@@ -178,14 +178,15 @@ jobs:
 
           # ── Remove source lines for missing Kconfig files ───────────────────
           # LineageOS SM8650 Kconfigs reference proprietary components not in tree.
-          # Scan every Kconfig for broken `source "..."` references and strip them.
+          # Use pattern-based sed (not line numbers) so multiple deletions in one
+          # file don't shift line numbers and miss subsequent refs.
           find kernel_source/drivers kernel_source/arch -name "Kconfig" 2>/dev/null | \
           while read kf; do
-            grep -n '^source "' "$kf" 2>/dev/null | while IFS=: read lineno srcline; do
-              ref=$(echo "$srcline" | sed 's/source "\(.*\)"/\1/')
+            grep '^source "' "$kf" 2>/dev/null | sed 's/source "\(.*\)"/\1/' | \
+            while read ref; do
               if [ ! -f "kernel_source/$ref" ]; then
                 echo "  [~] Removing missing Kconfig ref: $ref"
-                sed -i "${lineno}d" "$kf"
+                sed -i "\|^source \"${ref}\"|d" "$kf"
               fi
             done
           done
