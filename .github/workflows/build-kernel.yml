@@ -176,16 +176,18 @@ jobs:
         run: |
           mkdir -p "$OUT_DIR"
 
-          # ── Stub missing proprietary Kconfig files ───────────────────────────
-          # LineageOS SM8650 references Qualcomm-proprietary Kconfigs not in tree
-          for missing in \
-            "drivers/base/kernelFwUpdate/Kconfig" \
-            "drivers/base/oplus_chg/Kconfig" \
-            "drivers/oplus/Kconfig"; do
-            if [ ! -f "kernel_source/$missing" ]; then
-              mkdir -p "kernel_source/$(dirname $missing)"
-              touch "kernel_source/$missing"
-            fi
+          # ── Remove source lines for missing Kconfig files ───────────────────
+          # LineageOS SM8650 Kconfigs reference proprietary components not in tree.
+          # Scan every Kconfig for broken `source "..."` references and strip them.
+          find kernel_source/drivers kernel_source/arch -name "Kconfig" 2>/dev/null | \
+          while read kf; do
+            grep -n '^source "' "$kf" 2>/dev/null | while IFS=: read lineno srcline; do
+              ref=$(echo "$srcline" | sed 's/source "\(.*\)"/\1/')
+              if [ ! -f "kernel_source/$ref" ]; then
+                echo "  [~] Removing missing Kconfig ref: $ref"
+                sed -i "${lineno}d" "$kf"
+              fi
+            done
           done
 
           # ── Detect the correct defconfig ────────────────────────────────────
