@@ -176,6 +176,18 @@ jobs:
         run: |
           mkdir -p "$OUT_DIR"
 
+          # ── Stub missing proprietary Kconfig files ───────────────────────────
+          # LineageOS SM8650 references Qualcomm-proprietary Kconfigs not in tree
+          for missing in \
+            "drivers/base/kernelFwUpdate/Kconfig" \
+            "drivers/base/oplus_chg/Kconfig" \
+            "drivers/oplus/Kconfig"; do
+            if [ ! -f "kernel_source/$missing" ]; then
+              mkdir -p "kernel_source/$(dirname $missing)"
+              touch "kernel_source/$missing"
+            fi
+          done
+
           # ── Detect the correct defconfig ────────────────────────────────────
           DEFCONFIG=""
 
