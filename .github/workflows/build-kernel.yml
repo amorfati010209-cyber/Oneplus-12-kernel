@@ -47,17 +47,36 @@ jobs:
             zip unzip wget curl aria2 cpio \
             pahole dwarves
 
-      - name: Install Clang 17
+      - name: Install Clang and LLVM tools
         run: |
+          # Try LLVM 17 from official PPA; fall back to system clang-14
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
             | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
           echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main" \
             | sudo tee /etc/apt/sources.list.d/llvm17.list
           sudo apt-get update -qq
-          sudo apt-get install -y clang-17 lld-17 llvm-17
-          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-17 100
-          sudo update-alternatives --install /usr/bin/lld lld /usr/bin/lld-17 100
-          clang --version
+
+          if sudo apt-get install -y clang-17 lld-17 llvm-17 2>/dev/null \
+             && command -v clang-17 &>/dev/null; then
+            VER=17
+            echo "[+] Clang 17 installed from LLVM PPA"
+          else
+            echo "[!] LLVM 17 PPA failed — using system clang-14"
+            sudo apt-get install -y clang-14 lld-14 llvm-14
+            VER=14
+          fi
+
+          # Force-create /usr/bin/clang and /usr/bin/ld.lld symlinks
+          # (update-alternatives only creates /usr/bin/lld, NOT /usr/bin/ld.lld)
+          sudo ln -sfn "/usr/bin/clang-${VER}"   /usr/bin/clang
+          sudo ln -sfn "/usr/bin/ld.lld-${VER}"  /usr/bin/ld.lld
+          for tool in ar nm objcopy objdump strip readelf; do
+            [ -f "/usr/bin/llvm-${tool}-${VER}" ] && \
+              sudo ln -sfn "/usr/bin/llvm-${tool}-${VER}" "/usr/bin/llvm-${tool}" || true
+          done
+
+          echo "[+] clang  : $(clang  --version | head -1)"
+          echo "[+] ld.lld : $(ld.lld --version 2>&1 | head -1)"
           echo "CC_VERSION=$(clang --version | head -1)" >> $GITHUB_ENV
 
       - name: Install aarch64 cross-compiler
