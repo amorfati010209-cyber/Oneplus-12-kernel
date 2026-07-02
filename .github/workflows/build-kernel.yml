@@ -32,8 +32,10 @@ jobs:
   build:
     name: Build Kernel
     runs-on: ubuntu-22.04
+    timeout-minutes: 360
     env:
       OUT_DIR: ${{ github.workspace }}/out
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
 
     steps:
       - name: Checkout repository
@@ -301,8 +303,22 @@ jobs:
             printf "  %-40s %s\n" "$key" "$val"
           done
 
+      - name: Setup ccache
+        run: |
+          ccache --max-size=5G
+          ccache --zero-stats
+          echo "PATH=/usr/lib/ccache:$PATH" >> $GITHUB_ENV
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-kernel-op12-${{ env.KERNEL_LINEAGE_BRANCH }}-${{ github.sha }}
+          restore-keys: |
+            ccache-kernel-op12-${{ env.KERNEL_LINEAGE_BRANCH }}-
+            ccache-kernel-op12-
+
       - name: Build kernel image
-        timeout-minutes: 90
         run: |
           echo "[*] Building with $(nproc) jobs..."
           BUILD_START=$(date +%s)
@@ -311,7 +327,7 @@ jobs:
             O="$OUT_DIR" \
             ARCH=arm64 \
             SUBARCH=arm64 \
-            CC=clang \
+            CC="ccache clang" \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
             LLVM=1 \
