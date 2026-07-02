@@ -15,11 +15,9 @@ on:
 
 env:
   ARCH: arm64
-  SUBARCH: arm64
-  # AOSP GKI android14-6.1 — small, fast, GKI-compatible with OnePlus 12
-  KERNEL_REPO: https://android.googlesource.com/kernel/common
-  KERNEL_BRANCH: android14-6.1
-  KSU_REPO: https://github.com/tiann/KernelSU
+  # OnePlus official GKI common kernel for OOS 16 (Android 16 / B release)
+  KERNEL_REPO: https://github.com/OnePlusOSS/android_kernel_common_oneplus_sm8650
+  KERNEL_BRANCH: oneplus/sm8650_b_16.0.0_oneplus12
   AK3_REPO: https://github.com/osm0sis/AnyKernel3
 
 jobs:
@@ -46,36 +44,45 @@ jobs:
           sudo apt-get install -y \
             bc bison build-essential flex \
             git libelf-dev libssl-dev lz4 python3 \
-            zip unzip wget curl cpio \
+            zip unzip wget curl aria2 cpio \
             pahole dwarves
-          sudo apt-get install -y clang lld llvm
+
+      - name: Install Clang 17
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
+          echo "deb http://apt.llvm.org/jammy/ llvm-toolchain-jammy-17 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm17.list
+          sudo apt-get update -qq
+          sudo apt-get install -y clang-17 lld-17 llvm-17
+          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-17 100
+          sudo update-alternatives --install /usr/bin/lld lld /usr/bin/lld-17 100
           clang --version
           echo "CC_VERSION=$(clang --version | head -1)" >> $GITHUB_ENV
 
       - name: Install aarch64 cross-compiler
         run: |
           sudo apt-get install -y gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
-          aarch64-linux-gnu-gcc --version
 
       - name: Cache kernel source
         id: cache-kernel
         uses: actions/cache@v4
         with:
           path: kernel_source
-          key: kernel-gki-${{ env.KERNEL_BRANCH }}-${{ hashFiles('patches/*.patch') }}
+          key: kernel-op12-oos16-${{ env.KERNEL_BRANCH }}-${{ hashFiles('patches/*.patch') }}
           restore-keys: |
-            kernel-gki-${{ env.KERNEL_BRANCH }}-
-            kernel-gki-
+            kernel-op12-oos16-${{ env.KERNEL_BRANCH }}-
 
-      - name: Clone AOSP GKI kernel
+      - name: Clone OnePlus 12 GKI kernel (OOS 16)
         if: steps.cache-kernel.outputs.cache-hit != 'true'
         run: |
-          echo "[*] Cloning AOSP GKI android14-6.1..."
+          echo "[*] Cloning OnePlus GKI kernel (OOS16 / Android 16)..."
           git clone --depth=1 \
             --branch "${{ env.KERNEL_BRANCH }}" \
             "${{ env.KERNEL_REPO }}" \
             kernel_source
-          echo "[+] Cloned: $(head -3 kernel_source/Makefile)"
+          echo "[+] Kernel version:"
+          head -5 kernel_source/Makefile
 
       - name: Verify kernel source
         run: |
@@ -83,14 +90,15 @@ jobs:
           head -5 kernel_source/Makefile
           echo ""
           echo "=== Available configs ==="
-          ls kernel_source/arch/arm64/configs/ | head -20
+          ls kernel_source/arch/arm64/configs/
 
       - name: Integrate KernelSU
         if: ${{ github.event.inputs.with_ksu != 'false' }}
         run: |
-          echo "[*] Integrating KernelSU into GKI kernel..."
+          echo "[*] Integrating KernelSU via setup.sh..."
           cd kernel_source
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s main
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" \
+            | bash -s main
           KSU_VER=$(cd KernelSU && git describe --tags --abbrev=0 2>/dev/null || echo "latest")
           echo "KSU_VERSION=$KSU_VER" >> $GITHUB_ENV
           echo "[+] KernelSU $KSU_VER integrated"
@@ -122,14 +130,20 @@ jobs:
             O="$OUT_DIR" \
             ARCH=arm64 \
             CC=clang \
+            LD=ld.lld \
             CROSS_COMPILE=aarch64-linux-gnu- \
             LLVM=1 \
+            LLVM_IAS=1 \
             gki_defconfig
           echo "[+] Base config: $(wc -l < "$OUT_DIR/.config") lines"
 
       - name: Merge NetHunter config fragments
         run: |
           echo "[*] Merging NetHunter config..."
+
+          # Disable header install (key fix — avoids hours of HDRINST slowdown)
+          echo "CONFIG_HEADERS_INSTALL=n" >> nethunter-config/nethunter.config
+
           kernel_source/scripts/kconfig/merge_config.sh -m \
             -O "$OUT_DIR" \
             "$OUT_DIR/.config" \
@@ -140,6 +154,7 @@ jobs:
             O="$OUT_DIR" \
             ARCH=arm64 \
             CC=clang \
+            LD=ld.lld \
             CROSS_COMPILE=aarch64-linux-gnu- \
             LLVM=1 \
             olddefconfig
@@ -153,8 +168,11 @@ jobs:
             CONFIG_TUN \
             CONFIG_KSU \
             CONFIG_BT \
-            CONFIG_NETFILTER; do
-            val=$(grep "^${key}=" "$OUT_DIR/.config" 2>/dev/null | cut -d= -f2 || echo "NOT SET")
+            CONFIG_NETFILTER \
+            CONFIG_HEADERS_INSTALL; do
+            val=$(grep "^${key}[=]" "$OUT_DIR/.config" 2>/dev/null | cut -d= -f2 \
+                  || grep "^# ${key} " "$OUT_DIR/.config" 2>/dev/null | head -1 \
+                  || echo "NOT SET")
             printf "  %-40s %s\n" "$key" "$val"
           done
 
@@ -168,27 +186,38 @@ jobs:
             ARCH=arm64 \
             SUBARCH=arm64 \
             CC=clang \
+            LD=ld.lld \
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
             LLVM=1 \
             LLVM_IAS=1 \
+            KCFLAGS="-O2 -Wno-error" \
             -j$(nproc) \
-            Image.lz4
+            Image
 
           BUILD_END=$(date +%s)
           echo "[+] Build done in $((BUILD_END - BUILD_START))s"
-          ls -lh "$OUT_DIR/arch/arm64/boot/Image.lz4"
+          ls -lh "$OUT_DIR/arch/arm64/boot/Image"
+
+          # Compress to lz4 for AnyKernel3
+          lz4 -9 -f "$OUT_DIR/arch/arm64/boot/Image" \
+                    "$OUT_DIR/arch/arm64/boot/Image.lz4" || true
 
       - name: Clone AnyKernel3
         run: git clone --depth=1 "${{ env.AK3_REPO }}" AnyKernel3
 
       - name: Package flashable ZIP
         run: |
-          cp "$OUT_DIR/arch/arm64/boot/Image.lz4" AnyKernel3/
+          # Use Image.lz4 if available, else raw Image
+          if [ -f "$OUT_DIR/arch/arm64/boot/Image.lz4" ]; then
+            cp "$OUT_DIR/arch/arm64/boot/Image.lz4" AnyKernel3/
+          else
+            cp "$OUT_DIR/arch/arm64/boot/Image" AnyKernel3/
+          fi
           cp anykernel3/anykernel.sh AnyKernel3/anykernel.sh
 
           mkdir -p dist
-          ZIP_NAME="NetHunter-KernelSU-OnePlus12-Android16-$(date +%Y%m%d).zip"
+          ZIP_NAME="NetHunter-KernelSU-OnePlus12-OOS16-$(date +%Y%m%d).zip"
           cd AnyKernel3
           zip -r9 "$GITHUB_WORKSPACE/dist/${ZIP_NAME}" . -x "*.git*" -x "*.DS_Store"
           echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
@@ -204,8 +233,8 @@ jobs:
       - name: Upload kernel image (raw)
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-image-lz4
-          path: ${{ env.OUT_DIR }}/arch/arm64/boot/Image.lz4
+          name: kernel-image
+          path: ${{ env.OUT_DIR }}/arch/arm64/boot/Image*
           retention-days: 30
 
       - name: Build summary
@@ -215,7 +244,7 @@ jobs:
           echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|---|---|" >> $GITHUB_STEP_SUMMARY
           echo "| Device | OnePlus 12 (SM8650 / CPH2573) |" >> $GITHUB_STEP_SUMMARY
-          echo "| Android | 16 (OxygenOS 16) |" >> $GITHUB_STEP_SUMMARY
-          echo "| Kernel | AOSP GKI android14-6.1 |" >> $GITHUB_STEP_SUMMARY
+          echo "| OS | OxygenOS 16 (Android 16) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Kernel source | OnePlusOSS GKI common sm8650_b_16 |" >> $GITHUB_STEP_SUMMARY
           echo "| KernelSU | ${{ env.KSU_VERSION }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Clang | ${{ env.CC_VERSION }} |" >> $GITHUB_STEP_SUMMARY
